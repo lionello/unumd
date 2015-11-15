@@ -22,7 +22,8 @@ unittest
 enum Ubit { exact, inexact }
 
 
-struct Unum(F)
+/// Fixed sized Unum using a native floating point type F as storage
+struct Unum(F) if (__traits(isFloating, F))
 {
   static assert(Unum.sizeof == F.sizeof);
   static assert(Unum.alignof == F.alignof);
@@ -44,12 +45,12 @@ struct Unum(F)
 
   // Traits:
 
-  enum precbits = F.mant_dig < 32 ? 5U : F.mant_dig < 64 ? 6U : 7U;
+  enum precbits = F.mant_dig <= 32 ? 5U : F.mant_dig <= 64 ? 6U : 7U;//log2
   enum utagbits = precbits + 1;
   enum max_mant_dig = F.mant_dig - utagbits;
-  enum UBIT = 1U<<precbits;
+  enum UBIT = (cast(typeof(utag))1U)<<precbits;
   enum UFRACMASK = UBIT-1;
-  enum ULP = 2U<<precbits;
+  enum ULP = UBIT<<1;
   enum UTAGMASK = ULP-1;
 
   invariant { assert((utag & UFRACMASK) <= max_mant_dig || isNaN(value)); }
@@ -74,33 +75,41 @@ struct Unum(F)
     this.utag = (this.utag & ~UTAGMASK) | (u?UBIT:0) | exp;
   }
 
-  private this(I)(I v) if (__traits(isFloating, I)) { this.value = v; }
+  // Private constructor that wraps a floating point value
+  private this(I)(in I v) if (is(I == F)) { this.value = v; }
 
   // Properties from float/double/real
 
   enum nan = Unum!F(F.nan);
   enum infinity = Unum!F(F.infinity);
-  ubyte mant_dig() const @property { return utag&UFRACMASK; }
-  ubyte mant_dig(ubyte p) @property { assert(p <= max_mant_dig); utag = (utag & ~UFRACMASK) | p; return p;}
-  int dig() @property const { return cast(int)((mant_dig - 1) * oo2log10); }
-  F epsilon() @property { return std.math.exp2(1 - mant_dig); }
+  ubyte mant_dig() pure const @property { return utag&UFRACMASK; }
+  ubyte mant_dig(ubyte p) pure @property { assert(p <= max_mant_dig); utag = (utag & ~UFRACMASK) | p; return p;}
+  int dig() pure const @property { return cast(int)((mant_dig - 1) * oo2log10); }
+  F epsilon() pure const @property { return std.math.exp2(1 - mant_dig); }
 
   // Properties specific to Unum
 
-  typeof(this) exact() @property { auto t = this; t.utag &= ~UBIT; assert(t.isexact); return t; }
-  bool isexact() @property { return (utag&UBIT) == 0; }
-  Ubit ubit() const @property { return (utag&UBIT)?Ubit.inexact:Ubit.exact; }
-  Ubit ubit(Ubit u) @property { if (u) utag|=UBIT; else utag&=~UBIT; return u; }
+  typeof(this) exact() pure @property { auto t = this; t.utag &= ~UBIT; assert(t.isexact); return t; }
+  bool isexact() pure const @property { return (utag&UBIT) == 0; }
+  Ubit ubit() pure const @property { return (utag&UBIT)?Ubit.inexact:Ubit.exact; }
+  Ubit ubit(Ubit u) pure @property { if (u) utag|=UBIT; else utag&=~UBIT; return u; }
 
-  private auto _ulp() @property { return cast(typeof(utag))1<<(F.mant_dig - mant_dig); }
-  F lower() @property { auto t = this; t.utag &= ~(_ulp-1); return t.value; }
-  private F _realUpper() @property { auto t = this; t.value = lower; t.utag += _ulp; return t.value; }
-  F upper() @property { return isexact ? lower : _realUpper; }
-  F ulp() @property { return _realUpper - lower; }
+  private auto _ulp() pure const @property { return (cast(typeof(utag))1)<<(F.mant_dig - mant_dig); }
+  private F _realUpper() pure @property
+  {
+    auto t = Unum!F(lower);
+    t.utag += _ulp;
+    // TODO: detect fraction overflow
+    return t.value;
+  }
 
-  auto opUnary(string S)() { mixin("return Unum!F("~S~"value);"); }
+  F lower() pure @property { auto t = this; t.utag &= ~(_ulp-1); return t.value; }
+  F upper() pure @property { return isexact ? lower : _realUpper; }
+  F ulp() pure @property { return _realUpper - lower; }
 
-  auto opBinary(string S)(Unum!F rhs) if (S == '+')
+  auto opUnary(string S)() pure const { mixin("return Unum!F("~S~"value);"); }
+
+  auto opBinary(string S)(Unum!F rhs) pure if (S == '+')
   {
     Ubound!F lhs = this;
     Ubound!F r = rhs;
@@ -109,27 +118,43 @@ struct Unum(F)
   }
 }
 
+alias ufloat = Unum!float;
+alias udouble = Unum!double;
+alias ureal = Unum!real;
+
 
 enum Bound { close, open }
+
 
 struct Ubound(F)
 {
   Unum!F lo, hi;
 
+  invariant { assert( lo.value <= hi.value); }
+
   this(Unum!F x) { this.lo = x.lower; this.hi = x.upper; }
   this(Unum!F lo, Unum!F hi) { this.lo = lo; this.hi = hi; }
 
-  Bound boundLo() @property { return cast(Bound)lo.isexact; }
-  Bound boundHi() @property { return cast(Bound)hi.isexact; }
+  Bound boundLo() @property { return cast(Bound)lo.ubit; }
+  Bound boundHi() @property { return cast(Bound)hi.ubit; }
 
   auto opBinary(string S)(Ubound!F rhs) if (S == "+")
   {
     UBound!F r;
     r.lo = this.lo.value + rhs.lo.value;
     r.hi = this.hi.value + rhs.hi.value;
+    return r;
   }
 
   // Create Unum from Ubound
+}
+
+unittest
+{
+  ufloat uf = 1;
+  Ubound!float ub = uf;
+  ufloat uf2 = ufloat(0.33, Ubit.inexact, 6);
+  Ubound!float ub2 = uf2;
 }
 
 //TODO
@@ -163,6 +188,21 @@ unittest
   assert(ur.mant_dig == 55);
   assert(ur.dig == 16);
   assert(ur.exact.ubit == Ubit.exact);
+}
+
+unittest
+{
+  import std.meta;
+  foreach (T; AliasSeq!(float, double, real))
+  {
+    enum T v = 1/3.0;
+    foreach (const p; 2..Unum!T.max_mant_dig+1)
+    {
+      Unum!T u = Unum!T(v, Ubit.inexact, p);
+      assert(u.lower < v);
+      assert(v < u.upper);
+    }
+  }
 }
 
 unittest
